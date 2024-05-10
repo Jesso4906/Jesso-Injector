@@ -237,7 +237,7 @@ void __stdcall InternalManualMapCode(InternalManualMapParameter* param)
     IMAGE_NT_HEADERS* imageNtHeaders = (IMAGE_NT_HEADERS*)(dllBaseAddress + imageDosHeader->e_lfanew);
     IMAGE_OPTIONAL_HEADER* imageOptHeader = &imageNtHeaders->OptionalHeader;
 
-    unsigned long long locationOffset = (unsigned long long)dllBaseAddress - imageOptHeader->ImageBase;
+    uintptr_t locationOffset = (uintptr_t)dllBaseAddress - imageOptHeader->ImageBase;
     if (locationOffset != 0) // The dll is not loaded where the dll assumed it would be, so relocation data needs to be used to adjust
     {
         if (imageOptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size == 0) { return; }
@@ -253,7 +253,7 @@ void __stdcall InternalManualMapCode(InternalManualMapParameter* param)
             {
                 if (((*relativeInfo) >> 0x0C) == IMAGE_REL_BASED_HIGHLOW || ((*relativeInfo) >> 0x0C) == IMAGE_REL_BASED_DIR64) // checking flags to see if this relocation is relevant (32 or 64 bit)
                 {
-                    unsigned long long* patch = (unsigned long long*)(dllBaseAddress + relocation->VirtualAddress + ((*relativeInfo) & 0xFFF));
+                    uintptr_t* patch = (uintptr_t*)(dllBaseAddress + relocation->VirtualAddress + ((*relativeInfo) & 0xFFF));
                     *patch += locationOffset;
                 }
 
