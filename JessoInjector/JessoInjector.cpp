@@ -10,6 +10,26 @@ int main()
     std::cout << "Process ID: ";
     std::cin >> procId;
 
+    DWORD useDebugPrivilege = 0;
+    std::cout << "Use debug privilege (requires administrator) 1 - yes; 0 - no: ";
+    std::cin >> useDebugPrivilege;
+
+    if (useDebugPrivilege == 1)
+    {
+        LUID luid;
+        LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &luid);
+
+        TOKEN_PRIVILEGES tp;
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+        HANDLE accessToken;
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &accessToken);
+
+        AdjustTokenPrivileges(accessToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL);
+    }
+
     HANDLE procHandle = OpenProcess(PROCESS_ALL_ACCESS, 0, procId);
 
     bool successfullyInjected = false;
