@@ -1,96 +1,5 @@
 #include "JessoInjector.h"
 
-int main()
-{
-    std::string dllPath = "";
-    std::cout << "DLL Path: ";
-    std::getline(std::cin, dllPath);
-
-    DWORD procId = 0;
-    std::cout << "Process ID: ";
-    std::cin >> procId;
-
-    DWORD useDebugPrivilege = 0;
-    std::cout << "Use debug privilege (requires administrator) 0 - no; 1 - yes: ";
-    std::cin >> useDebugPrivilege;
-
-    if (useDebugPrivilege == 1)
-    {
-        LUID luid;
-        LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &luid);
-
-        TOKEN_PRIVILEGES tp;
-        tp.PrivilegeCount = 1;
-        tp.Privileges[0].Luid = luid;
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-        HANDLE accessToken;
-        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &accessToken);
-
-        AdjustTokenPrivileges(accessToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL);
-    }
-
-    HANDLE procHandle = OpenProcess(PROCESS_ALL_ACCESS, 0, procId);
-
-    bool successfullyInjected = false;
-
-    if (procHandle && procHandle != INVALID_HANDLE_VALUE)
-    {
-        std::cout << "Injection method:\n";
-        std::cout << "0 - call LoadLibraryA from remote thread.\n";
-        std::cout << "1 - call LoadLibraryA from hijcaked thread.\n";
-        std::cout << "2 - manually map dll; run internal code from remote thread.\n";
-        std::cout << "3 - manually map dll; run internal code from hijacked thread.\n";
-        int input;
-        std::cin >> input;
-
-        int threadId = -1;
-        if (input == 1 || input == 3)
-        {
-            std::cout << "Enter thread id to hijack (-1 to hijack first thread): ";
-            std::cin >> threadId;
-        }
-
-        switch (input)
-        {
-        case 0: 
-            successfullyInjected = InjectByLoadLibraryA(procHandle, dllPath.c_str());
-            break;
-        case 1: 
-            successfullyInjected = InjectByThreadHijack(procHandle, dllPath.c_str(), threadId);
-            break;
-        case 2: 
-        case 3:
-            successfullyInjected = InjectByManuallyMapping(procHandle, dllPath.c_str(), input == 3, threadId);
-            break;
-        default: 
-            std::cout << "Invalid injection method.\n";
-            break;
-        }
-        
-        CloseHandle(procHandle);
-    }
-    else 
-    {
-        std::cout << "Failed to get handle to process.\n";
-    }
-
-    if (successfullyInjected) 
-    { 
-        std::cout << "Successfully injected dll.\n";
-        Sleep(500);
-    }
-    else 
-    { 
-        std::cout << "Failed to inject dll.\n"; 
-        std::cout << "Press enter to exit.\n";
-
-        std::cin.get();
-    }
-
-    return 0;
-}
-
 bool FreezeAllThreads(HANDLE procHandle, bool resume)
 {
     DWORD procId = GetProcessId(procHandle);
@@ -152,26 +61,23 @@ HANDLE GetFirstThread(HANDLE procHandle)
     return 0;
 }
 
-bool InjectByLoadLibraryA(HANDLE procHandle, const char* dllPath)
+InjectionResult InjectByLoadLibraryA(HANDLE procHandle, const char* dllPath)
 {
     if (GetFileAttributesA(dllPath) == INVALID_FILE_ATTRIBUTES)
     {
-        std::cout << "DLL file not found.\n";
-        return false;
+        return FileNotFound;
     }
     
     void* dllPathLocation = VirtualAllocEx(procHandle, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!dllPathLocation)
     {
-        std::cout << "Failed to allocate memory for dll path.\n";
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     if (!WriteProcessMemory(procHandle, dllPathLocation, dllPath, strlen(dllPath) + 1, 0)) 
     {
-        std::cout << "Failed to write dll path to process memory.\n";
-        return false;
+        return FailedWriteProcessMemory;
     }
 
     HANDLE threadHandle = CreateRemoteThread(procHandle, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, dllPathLocation, 0, 0);
@@ -182,39 +88,34 @@ bool InjectByLoadLibraryA(HANDLE procHandle, const char* dllPath)
     }
     else
     {
-        std::cout << "Failed to create remote thread in process.\n";
-
         VirtualFreeEx(procHandle, dllPathLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedCreateRemoteThread;
     }
 
     Sleep(500);
 
     VirtualFreeEx(procHandle, dllPathLocation, 0, MEM_RELEASE);
 
-    return true;
+    return Success;
 }
 
-bool InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
+InjectionResult InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
 {
     if (GetFileAttributesA(dllPath) == INVALID_FILE_ATTRIBUTES)
     {
-        std::cout << "DLL file not found.\n";
-        return false;
+        return FileNotFound;
     }
 
     void* dllPathLocation = VirtualAllocEx(procHandle, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     if (!dllPathLocation)
     {
-        std::cout << "Failed to allocate memory for dll path.\n";
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     if (!WriteProcessMemory(procHandle, dllPathLocation, dllPath, strlen(dllPath) + 1, 0))
     {
-        std::cout << "Failed to write dll path to process memory.\n";
-        return false;
+        return FailedWriteProcessMemory;
     }
 
 #if _WIN64
@@ -260,16 +161,14 @@ bool InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
     void* shellCodeLocation = VirtualAllocEx(procHandle, 0, shellCodeLen, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!shellCodeLocation)
     {
-        std::cout << "Failed to allocate memory for shell code.\n";
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     void* savedCtxLocation = VirtualAllocEx(procHandle, 0, sizeof(CONTEXT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!savedCtxLocation)
     {
-        std::cout << "Failed to allocate memory for thread context.\n";
         VirtualFreeEx(procHandle, shellCodeLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     for (int i = 0; i < sizeof(uintptr_t); i++)
@@ -287,31 +186,28 @@ bool InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
 
     if (!threadHandle)
     {
-        std::cout << "Failed to open handle to target thread.\n";
         VirtualFreeEx(procHandle, shellCodeLocation, 0, MEM_RELEASE);
         VirtualFreeEx(procHandle, savedCtxLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedOpenThread;
     }
 
     if (!FreezeAllThreads(procHandle, false))
     {
-        std::cout << "Failed to create snapshot of threads.\n";
         CloseHandle(threadHandle);
         VirtualFreeEx(procHandle, shellCodeLocation, 0, MEM_RELEASE);
         VirtualFreeEx(procHandle, savedCtxLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedCreateThreadSnapshot;
     }
 
     CONTEXT ctx = {};
     ctx.ContextFlags = CONTEXT_FULL;
     if (!GetThreadContext(threadHandle, &ctx))
     {
-        std::cout << "Failed to get thread context.\n";
         FreezeAllThreads(procHandle, true);
         CloseHandle(threadHandle);
         VirtualFreeEx(procHandle, shellCodeLocation, 0, MEM_RELEASE);
         VirtualFreeEx(procHandle, savedCtxLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedGetThreadContext;
     }
 
     WriteProcessMemory(procHandle, shellCodeLocation, shellCodeBuffer, shellCodeLen, nullptr);
@@ -324,8 +220,6 @@ bool InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
     SetThreadContext(threadHandle, &ctx);
 
     FreezeAllThreads(procHandle, true);
-
-    std::cout << "Waiting for response from shell code...\n";
 
     bool injected = false;
     while (!injected)
@@ -342,15 +236,14 @@ bool InjectByThreadHijack(HANDLE procHandle, const char* dllPath, int threadId)
 
     VirtualFreeEx(procHandle, dllPathLocation, 0, MEM_RELEASE);
 
-    return true;
+    return Success;
 }
 
-bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijackThread, int threadId)
+InjectionResult InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijackThread, int threadId)
 {
     if (GetFileAttributesA(dllPath) == INVALID_FILE_ATTRIBUTES)
     {
-        std::cout << "DLL file not found.\n";
-        return false;
+        return FileNotFound;
     }
 
     // Read the dll file
@@ -359,17 +252,15 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
 
     if (file.fail())
     {
-        std::cout << "Failed to open file.\n";
         file.close();
-        return false;
+        return FailedToOpenFile;
     }
 
     DWORD fileSize = file.tellg(); // get pointer will be at the end of the file
     if (fileSize < 0x1000)
     {
-        std::cout << "File size is invalid.\n";
         file.close();
-        return false;
+        return FailedToOpenFile;
     }
 
     char* dllFileData = new char[fileSize];
@@ -382,9 +273,8 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
 
     if (imageDosHeader->e_magic != 0x5A4D) // 0x5A4D = "MZ"; this is a magic number to check the file is a valid PE file
     {
-        std::cout << "Invalid file type.\n";
         delete[] dllFileData;
-        return false;
+        return FailedToOpenFile;
     }
 
     // Allocating memory in the proccess for the dll file
@@ -403,9 +293,8 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
 
         if (!dllBaseAddress)
         {
-            std::cout << "Failed to allocate memory in proccess for file.\n";
             delete[] dllFileData;
-            return false;
+            return FailedVirtualAllocEx;
         }
     }
 
@@ -419,10 +308,9 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
         {
             if (!WriteProcessMemory(procHandle, dllBaseAddress + section->VirtualAddress, dllFileData + section->PointerToRawData, section->SizeOfRawData, nullptr))
             {
-                std::cout << "Failed to map section data.\n";
                 delete[] dllFileData;
                 VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
-                return false;
+                return FailedWriteProcessMemory;
             }
         }
         section++;
@@ -435,18 +323,16 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
     void* internalCodeLocation = VirtualAllocEx(procHandle, 0, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!internalCodeLocation)
     {
-        std::cout << "Failed to map allocate memory for internal.\n";
         VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     void* internalCodeParamLocation = VirtualAllocEx(procHandle, 0, sizeof(InternalManualMapParameter), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!internalCodeParamLocation)
     {
-        std::cout << "Failed to map allocate memory for internal code parameter.\n";
         VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
         VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
-        return false;
+        return FailedVirtualAllocEx;
     }
 
     WriteProcessMemory(procHandle, internalCodeLocation, InternalManualMapCode, 0x1000, nullptr);
@@ -468,34 +354,31 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
 
         if (!threadHandle)
         {
-            std::cout << "Failed to open handle to target thread.\n";
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedOpenThread;
         }
 
         if (!FreezeAllThreads(procHandle, false))
         {
-            std::cout << "Failed to create snapshot of threads.\n";
             CloseHandle(threadHandle);
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedCreateThreadSnapshot;
         }
 
         CONTEXT ctx = {};
         ctx.ContextFlags = CONTEXT_FULL;
         if (!GetThreadContext(threadHandle, &ctx))
         {
-            std::cout << "Failed to get thread context.\n";
             FreezeAllThreads(procHandle, true);
             CloseHandle(threadHandle);
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedGetThreadContext;
         }
 
 #if _WIN64
@@ -538,26 +421,24 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
         savedCtxLocation = VirtualAllocEx(procHandle, 0, sizeof(CONTEXT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!savedCtxLocation)
         {
-            std::cout << "Failed to allocate memory for thread context.\n";
             FreezeAllThreads(procHandle, true);
             CloseHandle(threadHandle);
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedVirtualAllocEx;
         }
 
         shellCodeLocation = VirtualAllocEx(procHandle, 0, shellCodeLen, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
         if (!shellCodeLocation)
         {
-            std::cout << "Failed to allocate memory for shell code.\n";
             FreezeAllThreads(procHandle, true);
             CloseHandle(threadHandle);
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, savedCtxLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedVirtualAllocEx;
         }
 
         for (int i = 0; i < sizeof(uintptr_t); i++)
@@ -588,17 +469,14 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
         HANDLE threadHandle = CreateRemoteThread(procHandle, nullptr, 0, (LPTHREAD_START_ROUTINE)internalCodeLocation, internalCodeParamLocation, 0, nullptr);
         if (!threadHandle)
         {
-            std::cout << "Failed to create remote thread in process to run internal code.\n";
             VirtualFreeEx(procHandle, dllBaseAddress, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
             VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
-            return false;
+            return FailedCreateRemoteThread;
         }
 
         CloseHandle(threadHandle);
     }
-
-    std::cout << "Waiting for response from internal code...\n";
 
     bool injected = false;
     while (!injected)
@@ -609,7 +487,7 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
         Sleep(100);
     }
 
-    if (hijackThread) 
+    if (hijackThread)
     {
         Sleep(250);
         VirtualFreeEx(procHandle, shellCodeLocation, 0, MEM_RELEASE);
@@ -619,7 +497,7 @@ bool InjectByManuallyMapping(HANDLE procHandle, const char* dllPath, bool hijack
     VirtualFreeEx(procHandle, internalCodeLocation, 0, MEM_RELEASE);
     VirtualFreeEx(procHandle, internalCodeParamLocation, 0, MEM_RELEASE);
 
-    return true;
+    return Success;
 }
 
 // compiler inserts code that will result in a crash if compiled in debug mode
